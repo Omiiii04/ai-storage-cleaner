@@ -1,0 +1,352 @@
+
+<style>
+.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}
+.tab-btn{display:flex;align-items:center;gap:5px;padding:.4rem .75rem;font-size:13px;border:none;border-bottom:2px solid transparent;background:transparent;color:var(--text-secondary);font-family:var(--font-sans);font-weight:400;cursor:pointer;white-space:nowrap;margin-bottom:-1px}
+.tab-btn.active{color:var(--text-accent);border-bottom-color:var(--text-accent);font-weight:500}
+.card{background:var(--surface-1);border:.5px solid var(--border);border-radius:12px;padding:1rem 1.25rem;margin-bottom:.75rem}
+.metric-card{background:var(--surface-1);border:.5px solid var(--border);border-radius:12px;padding:.875rem 1rem}
+.phase-card{background:var(--surface-1);border:.5px solid var(--border);border-radius:12px;padding:1rem 1.25rem;margin-bottom:.625rem;cursor:pointer;user-select:none}
+pre.code{font-family:var(--font-mono);font-size:12px;background:var(--surface-0);border:.5px solid var(--border);border-radius:8px;padding:.875rem 1rem;overflow-x:auto;line-height:1.7;white-space:pre;margin:0;color:var(--text-primary)}
+.lbl{font-size:11px;font-weight:500;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em}
+.tag{font-size:11px;padding:2px 8px;border-radius:4px;font-weight:500}
+.rule-row{display:flex;gap:10px;padding:.5rem .75rem;background:var(--surface-0);border-radius:0;margin-bottom:5px;align-items:flex-start;flex-wrap:wrap}
+.tip-box{background:var(--bg-warning);border:.5px solid var(--border-warning);border-radius:8px;padding:.625rem .875rem;font-size:13px;color:var(--text-warning);line-height:1.5;margin-top:.75rem}
+.safety-row{background:var(--surface-1);border:.5px solid var(--border);border-radius:12px;padding:.875rem 1.25rem;margin-bottom:.625rem;display:flex;align-items:flex-start;gap:12px}
+.run-row{background:var(--surface-1);border:.5px solid var(--border);border-radius:12px;padding:.875rem 1.25rem;margin-bottom:.625rem;display:flex;align-items:flex-start;gap:12px}
+.num-badge{width:26px;height:26px;border-radius:50%;background:var(--surface-0);border:.5px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--text-muted);flex-shrink:0;font-weight:500}
+th{text-align:left;padding:.5rem .75rem;color:var(--text-muted);font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:.05em;border-bottom:.5px solid var(--border)}
+td{padding:.6rem .75rem;font-size:13px;border-bottom:.5px solid var(--border)}
+tr:last-child td{border-bottom:none}
+</style>
+
+<h2 class="sr-only">Photo management agent — final implementation spec with 8 phases, tech stack, key logic snippets, safety rules, file structure, and run commands</h2>
+
+<div id="root" style="padding:1.5rem 0;font-family:var(--font-sans);color:var(--text-primary)"></div>
+
+<script>
+const STACK_ROWS=[
+  ["Agent framework","langgraph","langgraph","Multi-step state machine — you already know it"],
+  ["Google Photos","google-api-python-client","...client + auth-oauthlib","Official Google client, OAuth 2.0 Desktop flow"],
+  ["Image hashing","imagehash","imagehash","pHash for perceptual duplicate detection"],
+  ["Image metadata","Pillow · piexif · pillow-heif","Pillow piexif pillow-heif","Resolution, EXIF date/GPS, HEIC support"],
+  ["Database","chromadb · sqlite3","chromadb","Local vector store + SQLite scan cache"],
+  ["CLI","Typer · Rich","typer[all] rich","Commands, progress bars, action tables"],
+  ["Config","pydantic-settings","pydantic-settings python-dotenv","Type-safe .env config with validation"],
+  ["Logging","loguru","loguru","Structured logs, file rotation, colour console"],
+  ["Reports","Jinja2","jinja2","HTML summary from template"],
+];
+
+const PHASES=[
+  {n:1,title:"Setup & config",days:"Day 1",
+   tasks:["mkdir photo-agent && python -m venv .venv && source .venv/bin/activate","pip install -r requirements.txt","Google Cloud Console: create project → enable Photos Library API → OAuth 2.0 Desktop creds → download client_secret.json","Create .env: PC_PHOTOS_DIR, MOBILE_MOUNT_PATH, HRP_FOLDER, HAMMING_THRESHOLD=10, DRY_RUN=true","config.py: pydantic-settings BaseSettings class reading from .env with type validation","Loguru: console level INFO, daily file rotation at .logs/agent.log"],
+   tip:"Google Cloud path: console.cloud.google.com → APIs & Services → Library → search 'Photos Library API' → Enable → Credentials → + Create Credentials → OAuth 2.0 Client ID → Desktop App → Download JSON as client_secret.json"},
+  {n:2,title:"Storage connectors",days:"Days 2–3",
+   tasks:["utils/models.py: PhotoRecord dataclass (source, path_or_url, filename, size_bytes, width, height, created_at, phash)","storage/base.py: abstract StorageScanner with scan() → list[PhotoRecord]","storage/local.py: os.walk(PC_PHOTOS_DIR), filter {.jpg, .jpeg, .png, .heic, .mp4, .mov}","storage/google_photos.py: OAuth flow → save token to ~/.photo_agent_token.json → paginate /v1/mediaItems","storage/mobile.py: if Path(MOBILE_MOUNT_PATH).exists(): walk DCIM/ recursively","StorageManager: run all three scanners, return dict[str, list[PhotoRecord]]"],
+   tip:"Google Photos API: append '=w300-h300' to baseUrl for thumbnail (enough for pHash). Use mediaMetadata.width/height from the API response for resolution comparison — no need to download originals."},
+  {n:3,title:"Metadata & hashing",days:"Days 4–5",
+   tasks:["utils/metadata.py: Pillow Image.open() → .size; piexif.load() → DateTimeOriginal, GPSInfo, Make, Model","utils/hasher.py: imagehash.phash(img) → 64-bit hash stored as hex string","For Google Photos: use mediaMetadata.width/height from API; download thumbnail only for pHash","db/store.py: SQLite photo_index.db — id, source, path, phash, width, height, size, created_at","Caching: skip files already indexed with matching path + mtime + size. Re-index only on change.","ChromaDB collection 'photos': id=phash, metadata={source, path, width, height}"],
+   tip:"HEIC support: add 'from pillow_heif import register_heif_opener; register_heif_opener()' at startup in hasher.py. Without it, Pillow raises UnidentifiedImageError on .heic files."},
+  {n:4,title:"Duplicate detection",days:"Days 6–7",
+   tasks:["Build inverted index from SQLite: {phash_hex: list[PhotoRecord]} across all sources","For each phash group, compute pairwise Hamming distance between all photos","Mark pair as duplicates if Hamming distance ≤ HAMMING_THRESHOLD (default 10)","Merge transitive duplicates: if A~B and B~C, they belong to group {A, B, C}","Flag HRP candidates: photos in same group where local_pixels > cloud_pixels × 1.2","Output: list[DuplicateGroup] with all_photos, local_photos, cloud_photo, hrp_candidates"],
+   tip:"Hamming distance guide: 0 = byte-identical, ≤5 = near-certainly same image, ≤10 = same scene/slight edit, >15 = different photos. Start at 10, lower to 7 if false positives appear."},
+  {n:5,title:"Rule engine",days:"Day 8",
+   tasks:["Rule 1 — SKIP: group has only 1 source → not backed up, never touch","Rule 2 — MOVE_TO_HRP: local_pixels > cloud_pixels × 1.2 → move to HRP folder (runs before delete check)","Rule 3 — DELETE local: phash-confirmed copy on google_photos → move local copy to trash","Rule 4 — SKIP + WARN: cloud match is filename-only, no phash confirmation → log warning, skip","Priority: Rule 1 > Rule 2 > Rule 3 > Rule 4. First match wins.","Output: list[Action(type, photo, reason, confidence)]"],
+   tip:"Cloud confirmation = local phash matches cloud phash within HAMMING_THRESHOLD. Never delete based on filename alone — same name can exist on different photos."},
+  {n:6,title:"LangGraph agent",days:"Days 9–10",
+   tasks:["agent/state.py: AgentState TypedDict (scan_results, duplicate_groups, action_plan, execution_results, user_confirmed, report)","agent/graph.py: nodes — scan → extract → detect → plan → confirm → execute → report","Conditional edge at confirm: route to execute if user_confirmed else END","Retry wrapper (max 3) on scan node for Google Photos API network errors","MemorySaver checkpointer: state survives within a run, useful for debugging failures","Entry: graph.invoke({'user_confirmed': False, 'scan_results': {}})"],
+   tip:"V1: keep graph fully linear. The parallel Auth + Plan from the V2 diagram adds complexity — implement as two sequential nodes first. LangGraph's Send() API enables true parallelism in V2."},
+  {n:7,title:"Action executor",days:"Days 11–12",
+   tasks:["DRY RUN (default): Rich table of all planned actions + space to free → exit, no changes","EXECUTE mode: iterate action queue with Rich Progress bar","DELETE handler: shutil.move(src, TRASH_DIR / f'{uuid4().hex[:8]}_{filename}') — never os.remove()","MOVE_TO_HRP handler: shutil.move(src, HRP_FOLDER / filename), update SQLite index","On failure: log ActionResult(FAILED, error_msg), mark in DB, continue — never abort the queue","TRASH_DIR = ~/.photo_agent_trash/ — review before running purge-trash"],
+   tip:"UUID prefix prevents name collisions: trash/3a7f2b1c_photo.jpg keeps the original name readable while making each entry unique."},
+  {n:8,title:"Report + CLI",days:"Days 13–14",
+   tasks:["main.py: Typer app — commands: scan, run, report, purge-trash, clear-cache","run flags: --dry-run (default True), --execute, --threshold INT, --skip-mobile, --skip-google, --max-deletes INT","Rich console: spinner during scan, action preview table, colour-coded outcomes (green = ok, red = failed)","HTML report: Jinja2 template → photos scanned, dupes, space freed, HRP count, error count, action log","JSON log: reports/actions.json, appended each run with ISO timestamp","Confirm prompt: 'Execute 47 deletions and 12 HRP moves? [y/N]:' — default is N"],
+   tip:"Keep --execute as a separate explicit flag. 'python main.py run' without it is always safe. This prevents accidental execution from scripts or shell aliases."},
+];
+
+const SNIPPETS=[
+  {title:"pHash duplicate detection",code:`from imagehash import phash
+from PIL import Image
+
+HAMMING_THRESHOLD = 10  # set via .env
+
+def get_phash(filepath: str) -> str:
+    with Image.open(filepath) as img:
+        return str(phash(img))  # 64-bit hex string
+
+def hamming_distance(h1: str, h2: str) -> int:
+    return bin(int(h1, 16) ^ int(h2, 16)).count('1')
+
+def are_duplicates(h1: str, h2: str) -> bool:
+    return hamming_distance(h1, h2) <= HAMMING_THRESHOLD`},
+  {title:"HRP detection rule",code:`def is_hrp_candidate(local: PhotoRecord,
+                      cloud: PhotoRecord) -> bool:
+    local_px = local.width * local.height
+    cloud_px = cloud.width * cloud.height
+    if cloud_px == 0:
+        return False
+    return (local_px / cloud_px) > 1.2  # 20% more pixels
+
+def apply_hrp_rule(group: DuplicateGroup) -> Action | None:
+    cloud = group.get_by_source("google_photos")
+    local = group.get_best_local()
+    if cloud and local and is_hrp_candidate(local, cloud):
+        return Action(
+            type="MOVE_TO_HRP", photo=local,
+            reason=(f"Local {local.width}x{local.height} > "
+                    f"Cloud {cloud.width}x{cloud.height}")
+        )
+    return None`},
+  {title:"Rule engine (priority order)",code:`def apply_rules(groups: list[DuplicateGroup]) -> list[Action]:
+    actions = []
+    for group in groups:
+        sources = {r.source for r in group.all_photos}
+
+        # Rule 1: only 1 source — not backed up, never touch
+        if len(sources) < 2:
+            actions.append(Action("SKIP", group.primary,
+                                  "Only 1 source"))
+            continue
+
+        # Rule 2: HRP — high-res local takes priority over delete
+        hrp = apply_hrp_rule(group)
+        if hrp:
+            actions.append(hrp)
+            continue
+
+        # Rule 3: hash-confirmed on cloud → delete local
+        if ("google_photos" in sources
+                and group.cloud_phash_confirmed):
+            for photo in group.local_photos:
+                actions.append(Action("DELETE", photo,
+                    "Hash-confirmed on Google Photos"))
+            continue
+
+        # Default: skip (not enough confidence)
+        actions.append(Action("SKIP", group.primary,
+                              "No confirmed backup"))
+    return actions`},
+  {title:"LangGraph state + graph wiring",code:`from typing import TypedDict
+from langgraph.graph import StateGraph, END
+from langgraph.checkpoint.memory import MemorySaver
+
+class AgentState(TypedDict):
+    scan_results: dict[str, list[PhotoRecord]]
+    duplicate_groups: list[DuplicateGroup]
+    action_plan: list[Action]
+    execution_results: list[ActionResult]
+    user_confirmed: bool
+    report: dict
+
+builder = StateGraph(AgentState)
+nodes = [
+    ("scan", scan_node), ("extract", extract_metadata_node),
+    ("detect", detect_duplicates_node),
+    ("plan", apply_rules_node),
+    ("confirm", confirm_with_user_node),
+    ("execute", execute_actions_node),
+    ("report", generate_report_node),
+]
+for name, fn in nodes:
+    builder.add_node(name, fn)
+
+builder.set_entry_point("scan")
+for a, b in [("scan","extract"),("extract","detect"),
+             ("detect","plan"),("plan","confirm")]:
+    builder.add_edge(a, b)
+builder.add_conditional_edges(
+    "confirm",
+    lambda s: "execute" if s["user_confirmed"] else END
+)
+builder.add_edge("execute", "report")
+builder.add_edge("report", END)
+graph = builder.compile(checkpointer=MemorySaver())`},
+];
+
+const SAFETY=[
+  {icon:"ti-ban",color:"var(--text-danger)",text:"Dry-run is ON by default. Changes only happen with an explicit --execute flag — never accidentally."},
+  {icon:"ti-trash-x",color:"var(--text-danger)",text:"DELETE = shutil.move to ~/.photo_agent_trash/ only. Never call os.remove() or shutil.rmtree() anywhere in the codebase."},
+  {icon:"ti-copy",color:"var(--text-warning)",text:"Never delete if photo exists in fewer than 2 confirmed sources. Single-copy photos are always SKIP."},
+  {icon:"ti-certificate",color:"var(--text-warning)",text:"Cloud confirmation requires pHash match (Hamming ≤ threshold). Filename match alone is never sufficient."},
+  {icon:"ti-star",color:"var(--text-success)",text:"HRP overrides DELETE. If a local photo is both higher-res and a duplicate, it moves to HRP — not trash."},
+  {icon:"ti-file-description",color:"var(--text-accent)",text:"Every action is logged: timestamp, source path, action type, reason, and outcome (success or failed)."},
+  {icon:"ti-device-mobile-off",color:"var(--text-secondary)",text:"Mobile scan only runs if MOBILE_MOUNT_PATH exists on disk. Wrong path = clean skip, no errors thrown."},
+  {icon:"ti-lock",color:"var(--text-secondary)",text:"Google Photos token stored in ~/.photo_agent_token.json — never inside the project directory or committed to git."},
+  {icon:"ti-arrows-maximize",color:"var(--text-secondary)",text:"Use --max-deletes INT to hard-cap destructive actions per run as a second safety net."},
+];
+
+const FILE_TREE=`photo-agent/
+├── main.py                    # Typer CLI entrypoint
+├── config.py                  # pydantic-settings Config class
+├── requirements.txt
+├── .env                       # PC_PHOTOS_DIR, MOBILE_MOUNT_PATH, HRP_FOLDER
+├── .gitignore                 # *.json tokens, .env, *.db, __pycache__
+│
+├── agent/
+│   ├── graph.py               # LangGraph StateGraph definition
+│   ├── state.py               # AgentState TypedDict
+│   └── nodes/
+│       ├── scan.py
+│       ├── extract.py
+│       ├── detect.py
+│       ├── plan.py
+│       ├── confirm.py
+│       ├── execute.py
+│       └── report.py
+│
+├── storage/
+│   ├── base.py                # StorageScanner abstract class
+│   ├── local.py               # PC file scanner
+│   ├── google_photos.py       # Google Photos API client
+│   └── mobile.py              # USB mount scanner
+│
+├── core/
+│   ├── duplicate_detector.py
+│   ├── rule_engine.py
+│   └── executor.py
+│
+├── utils/
+│   ├── hasher.py              # pHash generation
+│   ├── metadata.py            # EXIF + resolution
+│   └── models.py              # PhotoRecord, DuplicateGroup, Action
+│
+├── db/
+│   ├── store.py               # ChromaDB + SQLite wrapper
+│   └── photo_index.db         # Scan cache (gitignored)
+│
+└── reports/
+    ├── template.html          # Jinja2 HTML report template
+    └── actions.json           # Run log (gitignored)`;
+
+const RUN_STEPS=[
+  {cmd:"python -m venv .venv && source .venv/bin/activate",note:"Create and activate virtual environment"},
+  {cmd:"pip install -r requirements.txt",note:"Install all dependencies"},
+  {cmd:"# Edit .env with your actual paths",note:"Set PC_PHOTOS_DIR, MOBILE_MOUNT_PATH, HRP_FOLDER"},
+  {cmd:"python main.py scan",note:"Scan all storages — read-only, completely safe"},
+  {cmd:"python main.py run --dry-run",note:"Preview planned actions without executing"},
+  {cmd:"python main.py run --execute",note:"Execute actions (moves to trash, no hard deletes)"},
+  {cmd:"python main.py report",note:"Open HTML summary of last run in browser"},
+  {cmd:"python main.py purge-trash",note:"Permanently remove trash contents after your review"},
+  {cmd:"python main.py run --threshold 5 --dry-run",note:"Stricter matching — fewer false positives"},
+  {cmd:"python main.py run --skip-mobile --dry-run",note:"Test run without mobile storage"},
+];
+
+const REQS=`langgraph>=0.2
+langchain-core>=0.3
+google-api-python-client>=2.100
+google-auth-oauthlib>=1.0
+imagehash>=4.3
+Pillow>=10.0
+piexif>=1.1
+pillow-heif>=0.13
+chromadb>=0.4
+typer[all]>=0.12
+rich>=13.0
+pydantic-settings>=2.0
+python-dotenv>=1.0
+loguru>=0.7
+jinja2>=3.1
+aiofiles>=23.0`;
+
+const TABS=[
+  {id:"overview",icon:"ti-layout-grid",label:"Overview"},
+  {id:"stack",icon:"ti-stack-2",label:"Stack"},
+  {id:"phases",icon:"ti-list-check",label:"Phases"},
+  {id:"logic",icon:"ti-code",label:"Key logic"},
+  {id:"safety",icon:"ti-shield-check",label:"Safety"},
+  {id:"tree",icon:"ti-folder",label:"File tree"},
+  {id:"run",icon:"ti-terminal-2",label:"Run"},
+];
+
+let activeTab="overview";
+let openPhase=null;
+let openSnippet=null;
+
+function tag(label,c){return`<span class="tag" style="background:var(--bg-${c});color:var(--text-${c});border:.5px solid var(--border-${c})">${label}</span>`}
+
+function renderOverview(){
+  const metrics=[
+    {n:"3",a:"storages connected",b:"Google Photos · PC · Mobile"},
+    {n:"8",a:"phases to implement",b:"~14 working days"},
+    {n:"3",a:"action types",b:"Delete · HRP · Skip"},
+    {n:"9",a:"pip packages",b:"Python 3.11+"},
+  ];
+  const mGrid=metrics.map(m=>`<div class="metric-card"><div style="font-size:30px;font-weight:500;color:var(--text-accent);line-height:1">${m.n}</div><div style="font-size:13px;color:var(--text-primary);margin-top:5px;line-height:1.4">${m.a}</div><div style="font-size:11px;color:var(--text-muted);margin-top:2px">${m.b}</div></div>`).join("");
+  const decisionRows=[
+    {cond:"Photo in only 1 source",act:"SKIP",bc:"var(--border)",fc:"var(--text-muted)",desc:"Not backed up — never touch"},
+    {cond:"Local res > Cloud × 1.2",act:"MOVE TO HRP",bc:"var(--border-success)",fc:"var(--text-success)",desc:"Preserve high-res local copy"},
+    {cond:"Hash-confirmed on cloud",act:"DELETE LOCAL",bc:"var(--border-danger)",fc:"var(--text-danger)",desc:"Move to trash, keep cloud"},
+    {cond:"Filename match only",act:"SKIP + WARN",bc:"var(--border-warning)",fc:"var(--text-warning)",desc:"Not safe enough — log warning"},
+  ].map(r=>`<div class="rule-row" style="border-left:3px solid ${r.bc}"><span style="font-family:var(--font-mono);font-size:12px;color:var(--text-secondary);min-width:190px">${r.cond}</span><span style="font-size:12px;font-weight:500;color:${r.fc};min-width:130px;padding:0 8px">${r.act}</span><span style="font-size:12px;color:var(--text-muted)">${r.desc}</span></div>`).join("");
+  const limits=["Google Photos API cannot download original full-res files — but mediaMetadata.width/height gives original dimensions. Use those for HRP comparison.","Mobile in V1 requires USB File Transfer mode (filesystem mount). ADB support is a V2 addition.","HEIC files need pillow-heif — register_heif_opener() at startup. Skip this and .heic photos won't hash.","First scan of a large library (>50k photos) is slow. Subsequent runs use the SQLite cache."].map(n=>`<div style="display:flex;gap:8px;margin-bottom:8px;font-size:13px;color:var(--text-secondary);line-height:1.5"><i class="ti ti-info-circle" style="font-size:15px;color:var(--text-muted);flex-shrink:0;margin-top:2px" aria-hidden="true"></i><span>${n}</span></div>`).join("");
+  return`<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:12px">${mGrid}</div>
+<div class="card"><div style="font-size:15px;font-weight:500;margin-bottom:8px">Goal</div><p style="font-size:14px;color:var(--text-secondary);margin:0 0 10px;line-height:1.7">Connects to Google Photos, your PC, and mobile simultaneously. Uses perceptual hashing to find duplicates across all three. Deletes local copies that are safely backed up on cloud, preserves high-resolution local copies in an HRP folder, and never touches photos that only exist in one place.</p><div style="display:flex;flex-wrap:wrap;gap:6px">${tag("Deletes confirmed dupes","danger")}${tag("Preserves high-res copies","success")}${tag("Dry-run by default","warning")}${tag("HTML report per run","accent")}</div></div>
+<div class="card"><div style="font-size:15px;font-weight:500;margin-bottom:10px">Decision logic — priority order</div>${decisionRows}</div>
+<div class="card"><div style="font-size:15px;font-weight:500;margin-bottom:8px">Limitations to keep in mind</div>${limits}</div>`;
+}
+
+function renderStack(){
+  const rows=STACK_ROWS.map((r,i)=>`<tr style="background:${i%2!==0?"var(--surface-0)":"transparent"}"><td style="font-weight:500;color:var(--text-primary)">${r[0]}</td><td style="font-family:var(--font-mono);font-size:12px;color:var(--text-accent)">${r[1]}</td><td style="font-family:var(--font-mono);font-size:11px;color:var(--text-secondary)">${r[2]}</td><td style="color:var(--text-secondary);font-size:12px">${r[3]}</td></tr>`).join("");
+  return`<div style="overflow-x:auto;margin-bottom:12px"><table style="width:100%;border-collapse:collapse"><thead><tr><th>Component</th><th>Library</th><th>pip install</th><th>Why</th></tr></thead><tbody>${rows}</tbody></table></div><div class="card"><div style="font-size:15px;font-weight:500;margin-bottom:8px">requirements.txt</div><pre class="code">${REQS}</pre></div>`;
+}
+
+function renderPhases(){
+  return PHASES.map(p=>{
+    const isOpen=openPhase===p.n;
+    const tasks=p.tasks.map(t=>`<li style="font-size:13px;color:var(--text-primary);margin-bottom:5px;line-height:1.5">${t}</li>`).join("");
+    const detail=isOpen?`<div style="margin-top:.875rem;padding-top:.875rem;border-top:.5px solid var(--border)"><ul style="margin:0 0 10px;padding-left:1.25rem">${tasks}</ul><div class="tip-box"><i class="ti ti-bulb" style="margin-right:6px" aria-hidden="true"></i>${p.tip}</div></div>`:"";
+    return`<div class="phase-card" onclick="togglePhase(${p.n})"><div style="display:flex;align-items:center;gap:12px"><div style="width:30px;height:30px;border-radius:50%;background:var(--bg-accent);color:var(--text-accent);display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:500;flex-shrink:0">${p.n}</div><div style="flex:1"><div style="font-weight:500;font-size:14px">${p.title}</div><div style="font-size:12px;color:var(--text-muted)">${p.days}</div></div><i class="ti ${isOpen?"ti-chevron-up":"ti-chevron-down"}" style="font-size:16px;color:var(--text-muted)" aria-hidden="true"></i></div>${detail}</div>`;
+  }).join("");
+}
+
+function renderLogic(){
+  const intro=`<p style="font-size:14px;color:var(--text-secondary);margin:0 0 12px;line-height:1.6">The four most important code patterns. Click each to expand.</p>`;
+  const cards=SNIPPETS.map((s,i)=>{
+    const isOpen=openSnippet===i;
+    const detail=isOpen?`<div style="margin-top:.875rem"><pre class="code">${s.code}</pre></div>`:"";
+    return`<div class="phase-card" onclick="toggleSnippet(${i})"><div style="display:flex;align-items:center;justify-content:space-between"><div style="display:flex;align-items:center;gap:8px"><i class="ti ti-code" style="font-size:15px;color:var(--text-muted)" aria-hidden="true"></i><span style="font-weight:500;font-size:14px">${s.title}</span></div><i class="ti ${isOpen?"ti-chevron-up":"ti-chevron-down"}" style="font-size:16px;color:var(--text-muted)" aria-hidden="true"></i></div>${detail}</div>`;
+  }).join("");
+  return intro+cards;
+}
+
+function renderSafety(){
+  const intro=`<p style="font-size:14px;color:var(--text-secondary);margin:0 0 12px;line-height:1.6">This agent deletes files. These rules are non-negotiable.</p>`;
+  const rows=SAFETY.map(r=>`<div class="safety-row"><i class="ti ${r.icon}" style="font-size:18px;color:${r.color};flex-shrink:0;margin-top:1px" aria-hidden="true"></i><span style="font-size:14px;color:var(--text-primary);line-height:1.5">${r.text}</span></div>`).join("");
+  return intro+rows;
+}
+
+function renderTree(){
+  const tip=`<div style="background:var(--bg-accent);border:.5px solid var(--border-accent);border-radius:8px;padding:.625rem .875rem;font-size:13px;color:var(--text-accent);margin-top:10px"><i class="ti ti-info-circle" style="margin-right:6px" aria-hidden="true"></i>Build order: utils/models.py first, then storage/, then core/, then agent/. main.py (CLI) is last.</div>`;
+  return`<div class="card"><pre class="code" style="font-size:12px">${FILE_TREE}</pre>${tip}</div>`;
+}
+
+function renderRun(){
+  const rows=RUN_STEPS.map((s,i)=>`<div class="run-row"><div class="num-badge">${i+1}</div><div><code style="font-family:var(--font-mono);font-size:12px;color:var(--text-accent);display:block;margin-bottom:3px">${s.cmd}</code><span style="font-size:12px;color:var(--text-muted)">${s.note}</span></div></div>`).join("");
+  return rows;
+}
+
+function render(){
+  const r=document.getElementById("root");
+  const tabNav=TABS.map(t=>`<button class="tab-btn${activeTab===t.id?" active":""}" onclick="setTab('${t.id}')"><i class="ti ${t.icon}" aria-hidden="true"></i>${t.label}</button>`).join("");
+  let content="";
+  if(activeTab==="overview") content=renderOverview();
+  else if(activeTab==="stack") content=renderStack();
+  else if(activeTab==="phases") content=renderPhases();
+  else if(activeTab==="logic") content=renderLogic();
+  else if(activeTab==="safety") content=renderSafety();
+  else if(activeTab==="tree") content=renderTree();
+  else if(activeTab==="run") content=renderRun();
+  r.innerHTML=`
+<div style="margin-bottom:1.25rem">
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px"><i class="ti ti-camera" style="font-size:20px;color:var(--text-accent)" aria-hidden="true"></i><h1 style="margin:0;font-size:22px;font-weight:500">Photo management agent</h1></div>
+  <p style="margin:0 0 .75rem;font-size:14px;color:var(--text-secondary);line-height:1.5">Final implementation spec — deduplicates across Google Photos, PC, and mobile</p>
+  <div style="display:flex;flex-wrap:wrap;gap:6px">${["Python 3.11","LangGraph","imagehash","ChromaDB","Typer + Rich"].map(t=>`<span style="font-size:11px;padding:2px 8px;border-radius:4px;background:var(--bg-accent);color:var(--text-accent);border:.5px solid var(--border-accent);font-weight:500">${t}</span>`).join("")}</div>
+</div>
+<div style="display:flex;border-bottom:.5px solid var(--border);margin-bottom:1.25rem;overflow-x:auto">${tabNav}</div>
+<div>${content}</div>`;
+}
+
+window.setTab=function(id){activeTab=id;openPhase=null;openSnippet=null;render()};
+window.togglePhase=function(n){openPhase=openPhase===n?null:n;render()};
+window.toggleSnippet=function(i){openSnippet=openSnippet===i?null:i;render()};
+render();
+</script>
