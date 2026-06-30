@@ -1,0 +1,36 @@
+# Environment & secrets
+.env
+client_secret.json
+*.token.json
+~/.photo_agent_token.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+.Python
+
+# Database & logs
+db/photo_index.db
+db/*.db
+.logs/
+*.log
+
+# Reports (generated output, do not commit)
+reports/report_*.html
+reports/actions.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
