@@ -1,13 +1,15 @@
+"""
+AgentState — the single state object threaded through every LangGraph node.
+
+pc_dirs and mobile_dirs carry the resolved folder lists from CLI / interactive
+input into the scan node, overriding .env defaults when provided.
+"""
 from typing import Optional, TypedDict
 
 from utils.models import Action, ActionResult, DuplicateGroup, PhotoRecord
 
 
 class AgentState(TypedDict, total=False):
-    """
-    Complete state object passed between all LangGraph nodes.
-    Fields are populated incrementally as the pipeline progresses.
-    """
 
     # ── Set at invoke time ────────────────────────────────────
     dry_run: bool
@@ -16,11 +18,13 @@ class AgentState(TypedDict, total=False):
     hamming_threshold: int
     max_deletes: Optional[int]
 
-    # ── scan_node → extract_node ──────────────────────────────
-    scan_results: dict[str, list[PhotoRecord]]   # {source: [PhotoRecord]}
+    # ── Dynamic folder selection (CLI / interactive) ──────────
+    # Empty list → fall back to .env defaults in StorageManager
+    pc_dirs: list[str]        # resolved local folder paths (string form for serialisation)
+    mobile_dirs: list[str]    # resolved on-device folder paths
 
-    # ── extract_node → detect_node ────────────────────────────
-    # scan_results is enriched in-place with phash values
+    # ── scan_node → extract_node ──────────────────────────────
+    scan_results: dict[str, list[PhotoRecord]]
 
     # ── detect_node → plan_node ───────────────────────────────
     duplicate_groups: list[DuplicateGroup]
@@ -35,4 +39,4 @@ class AgentState(TypedDict, total=False):
     execution_results: list[ActionResult]
 
     # ── report_node ───────────────────────────────────────────
-    report: dict   # {stats, report_path}
+    report: dict

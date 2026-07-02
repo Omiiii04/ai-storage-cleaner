@@ -1,12 +1,13 @@
 # Photo Management Agent — Full Implementation Prompt
 
+Use this prompt with Claude Code, Cursor, GitHub Copilot, or any AI coding assistant
+to implement, extend, or debug this project.
 
 ---
 
 ## Project overview
 
 Build a Python-based AI agent that deduplicates and organises photos across three storage sources:
-
 - **Google Photos** (cloud, via REST API + OAuth 2.0)
 - **PC local storage** (configurable path)
 - **Mobile storage** (USB-C mount, optional)
@@ -50,7 +51,7 @@ photo-agent/
 ├── main.py                    # Typer CLI (commands: scan, run, report, purge-trash, clear-cache)
 ├── config.py                  # pydantic-settings Config class, get_config() singleton
 ├── requirements.txt
-├── .env                       # PC_PHOTOS_DIR, HRP_FOLDER, MOBILE_MOUNT_PATH, etc.
+├── .env                       # PC_PHOTOS_DIR, HRP_FOLDER, ANDROID_*, etc.
 ├── .env.example
 ├── .gitignore
 ├── README.md
@@ -147,7 +148,6 @@ scan → extract → detect → plan → confirm ──(user_confirmed=True)─�
 ```
 
 Node responsibilities:
-
 - **scan**: StorageManager.scan_all() → scan_results
 - **extract**: compute pHash for local files, upsert all to SQLite
 - **detect**: detect_duplicates(scan_results, threshold) → duplicate_groups
@@ -171,12 +171,17 @@ PC_PHOTOS_DIR=/path/to/your/photos
 HRP_FOLDER=/path/to/HRP
 
 # Optional
-MOBILE_MOUNT_PATH=/Volumes/YourPhone   # or /media/user/Phone on Linux
 HAMMING_THRESHOLD=10                   # 0-64, default 10
 HRP_RATIO=1.2                          # local/cloud pixel ratio, default 1.2
 DRY_RUN=true                           # always default to dry-run
 MAX_DELETES=                           # leave empty for no cap
 LOG_LEVEL=INFO
+
+# Mobile (Android via ADB — see storage/mobile.py for full setup steps)
+ANDROID_REMOTE_DIR=/sdcard/DCIM
+ANDROID_DEVICE_SERIAL=                 # only needed with multiple devices connected
+ANDROID_TRASH_DIR=/sdcard/.photo_agent_trash
+ENABLE_MOBILE_DELETE=false             # off by default — soft-delete via adb shell mv when true
 
 # Google Photos
 GOOGLE_CREDENTIALS_PATH=client_secret.json
@@ -198,8 +203,7 @@ Hamming distance guide:
   0       = byte-identical
   ≤ 5     = almost certainly the same image
   ≤ 10    = same content, minor edit/crop/compression (recommended threshold)
-
-> 15    = different photos
+  > 15    = different photos
 
 ---
 
@@ -216,6 +220,7 @@ Rule 2: local_pixels / cloud_pixels > HRP_RATIO
 
 Rule 3: "google_photos" in sources AND group.cloud_phash_confirmed
         → DELETE for each photo in group.local_photos
+          (if photo.source == "mobile" and NOT ENABLE_MOBILE_DELETE: SKIP instead — gate, not default)
 
 Rule 4: "google_photos" in sources AND NOT cloud_phash_confirmed
         → SKIP + log WARNING (filename match only — not safe)
@@ -230,15 +235,15 @@ Default → SKIP (insufficient backup confidence)
 ## Action executor (core/executor.py)
 
 Dry-run:
-
 - Print Rich table of all planned actions
 - Return list[ActionResult] with outcome="DRY_RUN"
 - Touch zero files
 
-Execute:
-
-- DELETE → shutil.move(src, ~/.photo_agent_trash/UUID_filename)  ← NEVER os.remove()
-- MOVE_TO_HRP → shutil.move(src, HRP_FOLDER/filename)
+Execute (branches on photo.source):
+- DELETE (pc)     → shutil.move(src, ~/.photo_agent_trash/UUID_filename)  ← NEVER os.remove()
+- DELETE (mobile) → adb shell mv into ANDROID_TRASH_DIR (gated by ENABLE_MOBILE_DELETE)
+- MOVE_TO_HRP (pc)     → shutil.move(src, HRP_FOLDER/filename)
+- MOVE_TO_HRP (mobile) → adb pull (copy) into HRP_FOLDER — phone original untouched
 - On failure: log error, mark outcome="FAILED", continue queue — never abort
 - Append run log to reports/actions.json
 
@@ -247,14 +252,12 @@ Execute:
 ## Storage connectors
 
 ### LocalScanner (storage/local.py)
-
 - os.walk(PC_PHOTOS_DIR) recursively
 - Filter by extension: {.jpg, .jpeg, .png, .heic, .heif, .webp, .bmp, .tiff}
 - Build PhotoRecord with metadata from Pillow + piexif
 - pHash computed in extract node (not scan — scan is always fast)
 
 ### GooglePhotosScanner (storage/google_photos.py)
-
 - OAuth 2.0 Desktop flow via google-auth-oauthlib
 - Cache token at ~/.photo_agent_token.json
 - Paginate GET /v1/mediaItems (pageSize=100)
@@ -264,10 +267,19 @@ Execute:
 - Handle 401 by refreshing token and retrying (max 3 times)
 
 ### MobileScanner (storage/mobile.py)
-
-- Check MOBILE_MOUNT_PATH / "DCIM" exists
-- Delegate to LocalScanner(root_dir=DCIM_path, source="mobile")
-- If path not set or DCIM not found, log and return [] gracefully
+- Android phones use **MTP** over USB, not a real filesystem mount — `os.walk`/`pathlib` cannot
+  reliably read it on any OS (no native macOS support, no real Windows drive letter, flaky Linux gvfs)
+- Solution: talk to the phone via **ADB (Android Debug Bridge)** instead — works identically cross-platform
+- Setup requires: Developer Options + USB Debugging enabled on phone, `adb` binary on PATH, one-time
+  "Allow USB debugging?" authorization tapped on the phone screen
+- `scan()`: single `adb shell find <dir> -type f -exec stat -c '%n|%s|%Y' {} +` call — lists files
+  AND stats them in one round-trip (critical: one `adb shell stat` call per file is far too slow over USB)
+- Hashing requires pulling first: ADB has no direct byte-stream read API, so `pull_for_hash()` does
+  `adb pull` to a local temp cache, then the normal `get_phash()` runs on the local copy
+- Deletion uses `adb shell mv` into an on-device trash folder (`/sdcard/.photo_agent_trash`) — never
+  a hard delete — and is gated behind `ENABLE_MOBILE_DELETE` (off by default) in the rule engine
+- HRP for mobile = `adb pull` a copy to the local HRP_FOLDER; the phone original is left untouched
+- `cleanup_cache()` clears the temp pull cache — call this at the end of every CLI run
 
 ---
 
@@ -304,7 +316,9 @@ python main.py run --skip-mobile            # no mobile scan
 python main.py run --skip-google            # no Google Photos
 python main.py run --max-deletes 50         # cap deletes
 python main.py report                       # open latest HTML report
-python main.py purge-trash                  # delete trash (requires typed confirm)
+python main.py mobile-status                # diagnose ADB connection to phone
+python main.py purge-trash                  # delete PC trash (requires typed confirm)
+python main.py purge-mobile-trash           # delete on-device trash (requires typed confirm)
 python main.py clear-cache                  # wipe SQLite index
 ```
 
@@ -339,7 +353,6 @@ python main.py clear-cache                  # wipe SQLite index
 ## HEIC support
 
 Add at the top of utils/hasher.py before any Pillow import:
-
 ```python
 try:
     from pillow_heif import register_heif_opener
@@ -379,7 +392,7 @@ except ImportError:
 ## Testing the setup without Google Photos
 
 ```bash
-# Set PC_PHOTOS_DIR to any folder with images, leave MOBILE_MOUNT_PATH unset
+# Set PC_PHOTOS_DIR to any folder with images, use --skip-google below
 # Then run:
 python main.py scan --skip-google
 python main.py run --skip-google --dry-run

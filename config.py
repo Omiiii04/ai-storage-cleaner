@@ -1,6 +1,10 @@
 """
 Centralised configuration — reads from .env via pydantic-settings.
 All modules import get_config() rather than touching .env directly.
+
+PC_PHOTOS_DIR is now Optional — if not set in .env, the user must pass
+--pc-dir via CLI or use --interactive. This enables multi-folder scanning
+without editing .env for every new folder.
 """
 from pathlib import Path
 from typing import Optional
@@ -16,13 +20,33 @@ class Config(BaseSettings):
         extra="ignore",
     )
 
-    # ── Storage paths ──────────────────────────────────────────
-    pc_photos_dir: Path = Field(..., description="Root of PC photos directory")
+    # ── Storage paths (all optional — CLI args override these) ─
+    pc_photos_dir: Optional[Path] = Field(
+        None,
+        description="Default PC photos folder — used as fallback if no --pc-dir passed via CLI",
+    )
     hrp_folder: Path = Field(..., description="Destination for high-resolution local copies")
-    mobile_mount_path: Optional[Path] = Field(None, description="USB mount path for mobile device")
     trash_dir: Path = Field(
         default_factory=lambda: Path.home() / ".photo_agent_trash",
         description="Trash folder — files moved here instead of permanently deleted",
+    )
+
+    # ── Mobile (Android via ADB) ──────────────────────────────
+    android_remote_dir: str = Field(
+        "/sdcard/DCIM",
+        description="Default remote dir on device — used as fallback if no --mobile-dir passed via CLI",
+    )
+    android_device_serial: Optional[str] = Field(
+        None,
+        description="adb device serial — only needed if multiple devices connected (`adb devices -l`)",
+    )
+    android_trash_dir: str = Field(
+        "/sdcard/.photo_agent_trash",
+        description="On-device folder for soft-deleted mobile photos",
+    )
+    enable_mobile_delete: bool = Field(
+        False,
+        description="Allow DELETE actions to modify files on the phone itself (off by default)",
     )
 
     # ── Duplicate detection ────────────────────────────────────

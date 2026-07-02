@@ -1,5 +1,21 @@
+"""
+StorageManager — orchestrates all three scanners.
+
+Accepts explicit pc_dirs and mobile_dirs (from CLI or interactive mode)
+which override the .env defaults. This is the key to dynamic multi-folder
+scanning without touching config files.
+
+Resolution order for directories:
+    1. Explicit list passed to __init__  (CLI --pc-dir / --mobile-dir values)
+    2. .env default                      (PC_PHOTOS_DIR / ANDROID_REMOTE_DIR)
+    3. Error logged + scanner skipped    (neither set)
+"""
+from pathlib import Path
+from typing import Optional
+
 from loguru import logger
 
+from config import get_config
 from storage.base import StorageScanner
 from storage.google_photos import GooglePhotosScanner
 from storage.local import LocalScanner
@@ -8,22 +24,39 @@ from utils.models import PhotoRecord
 
 
 class StorageManager:
-    """Orchestrates all storage scanners and returns consolidated results."""
+    def __init__(
+        self,
+        skip_google: bool = False,
+        skip_mobile: bool = False,
+        pc_dirs: Optional[list[Path]] = None,
+        mobile_dirs: Optional[list[str]] = None,
+    ):
+        cfg = get_config()
+        self.scanners: list[StorageScanner] = []
 
-    def __init__(self, skip_google: bool = False, skip_mobile: bool = False):
-        self.scanners: list[StorageScanner] = [LocalScanner()]
+        # ── PC ────────────────────────────────────────────────
+        resolved_pc = pc_dirs or ([cfg.pc_photos_dir] if cfg.pc_photos_dir else [])
+        if not resolved_pc:
+            logger.error(
+                "No PC folders specified. "
+                "Use --pc-dir <path> or set PC_PHOTOS_DIR in .env"
+            )
+        else:
+            self.scanners.append(LocalScanner(root_dirs=resolved_pc, source="pc"))
 
+        # ── Google Photos ─────────────────────────────────────
         if not skip_google:
             self.scanners.append(GooglePhotosScanner())
 
+        # ── Mobile ────────────────────────────────────────────
         if not skip_mobile:
-            self.scanners.append(MobileScanner())
+            resolved_mobile = mobile_dirs or [cfg.android_remote_dir]
+            self.scanners.append(MobileScanner(remote_dirs=resolved_mobile))
 
     def scan_all(self) -> dict[str, list[PhotoRecord]]:
         """
-        Run all available scanners sequentially.
+        Run all available scanners.
         Returns {source_name: [PhotoRecord]}.
-        Unavailable scanners are skipped (not an error).
         """
         results: dict[str, list[PhotoRecord]] = {}
 

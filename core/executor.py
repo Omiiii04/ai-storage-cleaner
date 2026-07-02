@@ -71,6 +71,9 @@ def print_action_table(actions: list[Action]) -> None:
 # ── File operations ────────────────────────────────────────────
 
 def _do_delete(action: Action, trash_dir: Path) -> ActionResult:
+    if action.photo.source == "mobile":
+        return _do_mobile_delete(action)
+
     src = Path(action.photo.path_or_url)
     if not src.exists():
         return ActionResult(action=action, outcome="FAILED", error_msg="Source not found")
@@ -85,7 +88,22 @@ def _do_delete(action: Action, trash_dir: Path) -> ActionResult:
         return ActionResult(action=action, outcome="FAILED", error_msg=str(e))
 
 
+def _do_mobile_delete(action: Action) -> ActionResult:
+    """Soft-delete a phone photo via `adb shell mv` into an on-device trash folder."""
+    from storage.mobile import MobileScanner
+    scanner = MobileScanner()
+    ok, result = scanner.move_to_trash(action.photo.path_or_url, action.photo.filename)
+    if ok:
+        logger.info(f"[DELETE mobile] {action.photo.filename} → {result}")
+        return ActionResult(action=action, outcome="SUCCESS", dest_path=result)
+    logger.error(f"[DELETE mobile FAILED] {action.photo.filename}: {result}")
+    return ActionResult(action=action, outcome="FAILED", error_msg=result)
+
+
 def _do_hrp_move(action: Action, hrp_folder: Path) -> ActionResult:
+    if action.photo.source == "mobile":
+        return _do_mobile_hrp_pull(action, hrp_folder)
+
     src = Path(action.photo.path_or_url)
     if not src.exists():
         return ActionResult(action=action, outcome="FAILED", error_msg="Source not found")
@@ -100,6 +118,28 @@ def _do_hrp_move(action: Action, hrp_folder: Path) -> ActionResult:
     except Exception as e:
         logger.error(f"[HRP FAILED] {src}: {e}")
         return ActionResult(action=action, outcome="FAILED", error_msg=str(e))
+
+
+def _do_mobile_hrp_pull(action: Action, hrp_folder: Path) -> ActionResult:
+    """
+    Pull (copy) a high-res phone photo down into the local HRP folder via adb.
+    The original on the phone is left untouched — this only adds a copy,
+    it never removes anything from the device.
+    """
+    from storage.mobile import MobileScanner
+    scanner = MobileScanner()
+    hrp_folder.mkdir(parents=True, exist_ok=True)
+
+    dest = hrp_folder / action.photo.filename
+    if dest.exists():
+        dest = hrp_folder / f"{uuid.uuid4().hex[:6]}_{action.photo.filename}"
+
+    ok, err = scanner.pull_to(action.photo.path_or_url, dest)
+    if ok:
+        logger.info(f"[HRP mobile] {action.photo.filename} → {dest} (phone copy untouched)")
+        return ActionResult(action=action, outcome="SUCCESS", dest_path=str(dest))
+    logger.error(f"[HRP mobile FAILED] {action.photo.filename}: {err}")
+    return ActionResult(action=action, outcome="FAILED", error_msg=err)
 
 
 def _append_log(results: list[ActionResult], log_path: Path) -> None:

@@ -117,6 +117,42 @@ class PhotoStore:
         with self._conn() as conn:
             return conn.execute("SELECT COUNT(*) FROM photos").fetchone()[0]
 
+    def stats(self) -> dict:
+        """
+        Return a summary dict used by the CLI footprint panel.
+        Tells the user exactly how much storage the index uses and what is stored.
+        """
+        with self._conn() as conn:
+            by_source: dict[str, dict] = {}
+            for row in conn.execute(
+                "SELECT source, COUNT(*), COUNT(phash), COALESCE(SUM(size_bytes), 0) "
+                "FROM photos GROUP BY source"
+            ).fetchall():
+                by_source[row[0]] = {
+                    "total":      row[1],
+                    "hashed":     row[2],
+                    "size_bytes": row[3],   # sum of original photo sizes (not index size)
+                }
+
+            total             = conn.execute("SELECT COUNT(*) FROM photos").fetchone()[0]
+            total_hashed      = conn.execute("SELECT COUNT(phash) FROM photos").fetchone()[0]
+            total_photo_bytes = conn.execute(
+                "SELECT COALESCE(SUM(size_bytes), 0) FROM photos"
+            ).fetchone()[0]
+            last_indexed      = conn.execute("SELECT MAX(indexed_at) FROM photos").fetchone()[0]
+
+        db_size_bytes = self.db_path.stat().st_size if self.db_path.exists() else 0
+
+        return {
+            "by_source":         by_source,
+            "total":             total,
+            "total_hashed":      total_hashed,
+            "total_photo_bytes": total_photo_bytes,   # your actual library size
+            "db_size_bytes":     db_size_bytes,        # size of photo_index.db only
+            "db_path":           str(self.db_path.resolve()),
+            "last_indexed":      last_indexed,
+        }
+
     # ── Internal ───────────────────────────────────────────────
 
     @staticmethod

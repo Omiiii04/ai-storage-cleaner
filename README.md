@@ -33,7 +33,7 @@ pip install -r requirements.txt
 
 ```bash
 cp .env.example .env
-# Edit .env — set PC_PHOTOS_DIR, HRP_FOLDER, and optionally MOBILE_MOUNT_PATH
+# Edit .env — set PC_PHOTOS_DIR and HRP_FOLDER (mobile config is optional, see below)
 ```
 
 ### 3. Set up Google Photos API
@@ -44,11 +44,24 @@ cp .env.example .env
 4. Download JSON → save as `client_secret.json` in the project root
 5. First run opens a browser for Google sign-in. Token is cached at `~/.photo_agent_token.json`
 
-### 4. Mobile (optional)
+### 4. Mobile (optional — Android via ADB)
 
-Connect your phone via USB-C in **File Transfer** mode, then set `MOBILE_MOUNT_PATH` in `.env`:
-- macOS: `/Volumes/YourPhoneName`
-- Linux: `/media/youruser/YourPhoneName`
+Android phones connect over USB using **MTP**, which is not a real filesystem mount — `os.walk`/`pathlib` can't read it reliably on any OS (no native support on macOS, no real drive letter on Windows, flaky gvfs mounts on Linux). This project talks to the phone over **ADB (Android Debug Bridge)** instead, which works identically across all three OSes.
+
+1. On the phone: **Settings → About Phone → tap "Build Number" 7×** to unlock Developer Options
+2. **Settings → Developer Options → enable "USB Debugging"**
+3. Install the `adb` binary:
+   - macOS: `brew install android-platform-tools`
+   - Windows: [platform-tools](https://developer.android.com/tools/releases/platform-tools) (add to PATH)
+   - Linux: `sudo apt install android-tools-adb`
+4. Connect via USB-C, then run `adb devices` — the phone will show **unauthorized** the first time
+5. A prompt appears **on the phone**: "Allow USB debugging?" → check "Always allow" → tap **Allow**
+6. Verify from inside this project:
+   ```bash
+   python main.py mobile-status
+   ```
+
+No `.env` changes needed for default setup — only set `ANDROID_DEVICE_SERIAL` if you have multiple devices connected at once.
 
 ---
 
@@ -67,8 +80,14 @@ python main.py run --execute
 # Open HTML report in browser
 python main.py report
 
+# Check ADB connection to your phone (run this first if mobile scanning fails)
+python main.py mobile-status
+
 # Permanently delete trash after reviewing it
 python main.py purge-trash
+
+# Permanently delete the on-device mobile trash folder after reviewing it
+python main.py purge-mobile-trash
 
 # Options
 python main.py run --skip-mobile --dry-run     # exclude mobile
@@ -120,9 +139,10 @@ photo-agent/
 ## Safety guarantees
 
 - `--execute` flag is required to make any changes — dry-run is the default
-- Deletions go to `~/.photo_agent_trash/` — review before running `purge-trash`
+- PC deletions go to `~/.photo_agent_trash/` — review before running `purge-trash`
+- Mobile deletions are **off by default** (`ENABLE_MOBILE_DELETE=false`) — when enabled, they're soft-deleted to an on-device trash folder via `adb shell mv`, never hard-deleted
 - Cloud confirmation requires **pHash match**, not just filename
-- HRP always overrides DELETE — high-res local copies are preserved first
+- HRP always overrides DELETE — high-res copies are preserved first (mobile HRP photos are *copied* to the PC; the phone original is never touched)
 - `--max-deletes` caps destructive actions per run
 
 ---

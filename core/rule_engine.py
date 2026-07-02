@@ -73,6 +73,18 @@ def apply_rules(
         # ── Rule 3: hash-confirmed cloud backup → delete local ─
         if "google_photos" in sources and group.cloud_phash_confirmed:
             for photo in group.local_photos:
+                if photo.source == "mobile" and not cfg.enable_mobile_delete:
+                    actions.append(Action(
+                        type="SKIP",
+                        photo=photo,
+                        reason=(
+                            "Mobile delete disabled by default — set "
+                            "ENABLE_MOBILE_DELETE=true in .env to allow, or "
+                            "delete manually via your phone's gallery app"
+                        ),
+                        confidence=0.8,
+                    ))
+                    continue
                 actions.append(Action(
                     type="DELETE",
                     photo=photo,

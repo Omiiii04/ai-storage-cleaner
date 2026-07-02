@@ -2,7 +2,6 @@
 LangGraph pipeline: scan → extract → detect → plan → confirm → execute → report
 The conditional edge at 'confirm' aborts cleanly if user says no (or dry-run).
 """
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 
 from agent.nodes.confirm import confirm_with_user_node
@@ -45,7 +44,11 @@ def build_graph() -> StateGraph:
     builder.add_edge("execute", "report")
     builder.add_edge("report", END)
 
-    return builder.compile(checkpointer=MemorySaver())
+    # No checkpointer — this pipeline is stateless per-run.
+    # If persistence across runs is needed in a future version,
+    # add MemorySaver() and pass config={"configurable": {"thread_id": "..."}}
+    # to every graph.invoke() call.
+    return builder.compile()
 
 
 # Singleton — import this in main.py
