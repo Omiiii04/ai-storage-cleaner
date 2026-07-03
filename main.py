@@ -371,7 +371,8 @@ def scan(
 
 @app.command()
 def run(
-    execute:     bool                = typer.Option(False, "--execute",     help="Apply changes (default: dry-run)"),
+    execute:     bool                = typer.Option(False, "--execute",     help="Apply changes — move duplicates to trash (default: dry-run, no files changed)"),
+    dry_run:     bool                = typer.Option(True,  "--dry-run",     help="Preview only — no files changed (this is the default; use --execute to act)", hidden=True),
     pc_dir:      Optional[list[str]] = typer.Option(None,  "--pc-dir",     help="PC folder to scan (repeat for multiple)"),
     mobile_dir:  Optional[list[str]] = typer.Option(None,  "--mobile-dir", help="Phone folder to scan (repeat for multiple)"),
     interactive: bool                = typer.Option(False, "--interactive", "-i", help="Pick folders interactively"),

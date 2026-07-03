@@ -53,16 +53,6 @@ def adb_available() -> bool:
 
 
 def run_adb(args: list[str], timeout: int = 30) -> subprocess.CompletedProcess:
-    r"""
-    Run 'adb <args>' and return a CompletedProcess (never raises).
-
-    IMPORTANT — shell quoting:
-    When a command contains shell operators like ( ) | ; >, do NOT split
-    them into separate argv tokens. Instead pass the whole command as a
-    single string in the args list AFTER 'shell', e.g.:
-        run_adb(["shell", "find /sdcard -type f \( -iname '*.jpg' \) -exec dirname {} +"])
-    Splitting breaks them: Android sh would receive literal \( as a file.
-    """
     try:
         return subprocess.run(
             ["adb", *args], capture_output=True, text=True, timeout=timeout,
@@ -133,42 +123,72 @@ class MobileScanner(StorageScanner):
 
     # ── Interactive: list folders on device ────────────────────
 
+
     def list_scannable_dirs(self, parent: str = "/sdcard") -> list[str]:
         """
-        Return directories on the device that actually contain photos.
-        Used by the interactive folder picker in main.py.
+        Return on-device directories that likely contain photos.
 
-        Passes the entire find expression as a SINGLE shell string so that
-        shell operators ( ) are interpreted by sh, not passed as literals.
+        KEY FIX: previous version used:
+            find /sdcard -maxdepth 4 -type f -iname "*.jpg" -exec dirname {} +
+        This finds every image FILE and extracts its parent dir.
+        With 1,447+ photos it runs for 2+ minutes — user Ctrl+Cs.
+
+        New approach: find -type d -maxdepth 3
+        Finds DIRECTORIES only (no file content read), returns in 2–5 seconds.
+        Then filter by known photo-folder keywords to keep the list clean.
         """
-        logger.info(f"Listing photo-containing folders under {parent} on device…")
-        # Single shell string — sh parses ( ) and -exec correctly
-        cmd = (
-            f"find '{parent}' -maxdepth 5 -type f "
-            r"\( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' "
-            r"-o -iname '*.heic' -o -iname '*.heif' -o -iname '*.webp' \) "
-            "-exec dirname '{}' + 2>/dev/null"
-        )
+        logger.info(f"Listing photo folders under {parent}…")
         result = run_adb(
-            self._device_args() + ["shell", cmd],
-            timeout=60,
+            self._device_args() + [
+                "shell", "find", parent, "-maxdepth", "3", "-type", "d"
+            ],
+            timeout=30,
         )
-        seen: set[str] = set()
+
+        SKIP_DIRS  = {"android", "obb", ".tmp", ".trash", ".thumbnails",
+                      "cache", ".cache", "data", "com.android", ".nomedia"}
+        PHOTO_KEYS = {"dcim", "camera", "pictures", "photos", "image", "images",
+                      "whatsapp", "telegram", "instagram", "snapchat",
+                      "screenshot", "screenshots", "download", "downloads",
+                      "media", "video", "movies"}
+
         dirs: list[str] = []
         for line in result.stdout.splitlines():
             d = line.strip()
-            if d and d not in seen:
-                seen.add(d)
-                dirs.append(d)
-        return sorted(dirs)
+            if not d or d == parent:
+                continue
 
-    # ── Scanning ───────────────────────────────────────────────
+            parts = d.lower().split("/")
+            last  = parts[-1] if parts else ""
+
+            # Skip Android system dirs and hidden dirs
+            if last.startswith("."):
+                continue
+            if "android" in parts:
+                continue
+            if last in SKIP_DIRS:
+                continue
+
+            depth = d.lstrip("/").count("/") - parent.lstrip("/").count("/")
+
+            # Include if name matches photo keywords OR is a shallow (depth 1) dir
+            if any(kw in last for kw in PHOTO_KEYS) or depth == 1:
+                dirs.append(d)
+
+        if not dirs:
+            logger.warning("No photo dirs found — falling back to defaults")
+            return [f"{parent}/DCIM", f"{parent}/Pictures"]
+
+        return sorted(dirs)
 
     def _list_files_in_dir(self, remote_dir: str) -> list[dict]:
         """
-        Single round-trip: find all image files + stat them in one call.
-        Passes command as a single shell string so the pipe delimiter in
-        the stat format string isn't mistaken for a shell pipe operator.
+        Single round-trip: find image files + stat them.
+
+        IMPORTANT: pass the entire command as a single shell string.
+        The pipe in stat -c '%n|%s|%Y' is a shell operator — splitting
+        into argv tokens causes Android sh to treat it as a real pipe,
+        breaking the output. A single-string command avoids this.
         """
         cmd = (
             f"find '{remote_dir}' -type f "

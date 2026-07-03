@@ -1,11 +1,12 @@
 """
 Action executor.
-DRY RUN (default): prints a Rich table of planned actions, touches nothing.
+DRY RUN (default): prints a compact action preview, touches nothing.
 EXECUTE: moves files to trash or HRP folder; never calls os.remove().
 """
 import json
 import shutil
 import uuid
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -24,10 +25,12 @@ console = Console()
 # ── Formatting helpers ─────────────────────────────────────────
 
 def _fmt_bytes(n: int) -> str:
+    if n == 0:
+        return "0 B"
     for unit in ("B", "KB", "MB", "GB"):
         if n < 1024:
             return f"{n:.1f} {unit}"
-        n //= 1024
+        n /= 1024
     return f"{n:.1f} TB"
 
 
@@ -37,35 +40,61 @@ _TYPE_COLOUR = {"DELETE": "red", "MOVE_TO_HRP": "green", "SKIP": "dim"}
 # ── Preview table ──────────────────────────────────────────────
 
 def print_action_table(actions: list[Action]) -> None:
-    """Print a Rich table summarising the planned actions."""
-    table = Table(title="Planned actions", show_header=True, header_style="bold")
-    table.add_column("Type",     min_width=14, style="bold")
-    table.add_column("Filename", min_width=32)
-    table.add_column("Source",   min_width=14)
-    table.add_column("Reason")
+    """
+    Print a Rich summary of planned actions.
 
-    for action in actions:
-        colour = _TYPE_COLOUR.get(action.type, "white")
-        table.add_row(
-            f"[{colour}]{action.type}[/{colour}]",
-            action.photo.filename,
-            action.photo.source,
-            action.reason,
-        )
+    KEY FIX: previous version printed every individual SKIP as its own table row.
+    With 2,000+ photos all returning SKIP (common when --skip-google is used),
+    this floods the terminal with thousands of identical lines and is unreadable.
 
-    console.print(table)
+    New behaviour:
+    - DELETE and MOVE_TO_HRP → shown individually in a table (you want to review these)
+    - SKIP                   → collapsed into a grouped count summary
+    """
+    non_skips = [a for a in actions if a.type != "SKIP"]
+    skips     = [a for a in actions if a.type == "SKIP"]
+    deletes   = [a for a in actions if a.type == "DELETE"]
+    hrp       = [a for a in actions if a.type == "MOVE_TO_HRP"]
+    freed     = sum(a.photo.size_bytes for a in deletes)
 
-    deletes  = [a for a in actions if a.type == "DELETE"]
-    hrp      = [a for a in actions if a.type == "MOVE_TO_HRP"]
-    skips    = [a for a in actions if a.type == "SKIP"]
-    freed    = sum(a.photo.size_bytes for a in deletes)
-
+    # ── Summary line (always shown first) ─────────────────────
     console.print(
         f"\n[bold]Summary:[/bold]  "
         f"[red]{len(deletes)} delete[/red] ({_fmt_bytes(freed)} freed)  ·  "
         f"[green]{len(hrp)} → HRP[/green]  ·  "
         f"[dim]{len(skips)} skip[/dim]"
     )
+
+    # ── Actionable items table ─────────────────────────────────
+    if non_skips:
+        table = Table(
+            title="Actions to execute", show_header=True,
+            header_style="bold", min_width=80,
+        )
+        table.add_column("Type",     min_width=14, style="bold")
+        table.add_column("Filename", min_width=36)
+        table.add_column("Source",   min_width=14)
+        table.add_column("Reason")
+
+        for action in non_skips:
+            colour = _TYPE_COLOUR.get(action.type, "white")
+            table.add_row(
+                f"[{colour}]{action.type}[/{colour}]",
+                action.photo.filename,
+                action.photo.source,
+                action.reason,
+            )
+        console.print(table)
+    else:
+        console.print("[dim]  No delete or HRP actions planned.[/dim]")
+
+    # ── Skip summary (grouped, not individual rows) ────────────
+    if skips:
+        console.print(f"\n[dim]Skipped {len(skips)} photos:[/dim]")
+        # Group by (source, reason) → count
+        groups = Counter((a.photo.source, a.reason) for a in skips)
+        for (source, reason), count in sorted(groups.items()):
+            console.print(f"  [dim]{count:>5}  {source:<16}  {reason}[/dim]")
 
 
 # ── File operations ────────────────────────────────────────────
@@ -89,7 +118,6 @@ def _do_delete(action: Action, trash_dir: Path) -> ActionResult:
 
 
 def _do_mobile_delete(action: Action) -> ActionResult:
-    """Soft-delete a phone photo via `adb shell mv` into an on-device trash folder."""
     from storage.mobile import MobileScanner
     scanner = MobileScanner()
     ok, result = scanner.move_to_trash(action.photo.path_or_url, action.photo.filename)
@@ -121,11 +149,6 @@ def _do_hrp_move(action: Action, hrp_folder: Path) -> ActionResult:
 
 
 def _do_mobile_hrp_pull(action: Action, hrp_folder: Path) -> ActionResult:
-    """
-    Pull (copy) a high-res phone photo down into the local HRP folder via adb.
-    The original on the phone is left untouched — this only adds a copy,
-    it never removes anything from the device.
-    """
     from storage.mobile import MobileScanner
     scanner = MobileScanner()
     hrp_folder.mkdir(parents=True, exist_ok=True)
@@ -175,17 +198,6 @@ def execute_actions(
     dry_run: bool = True,
     max_deletes: Optional[int] = None,
 ) -> list[ActionResult]:
-    """
-    Execute or simulate the action queue.
-
-    Args:
-        actions:     output of rule_engine.apply_rules()
-        dry_run:     if True, only preview — no files moved
-        max_deletes: hard cap on DELETE actions (safety net)
-
-    Returns:
-        list[ActionResult] with outcome for every action
-    """
     cfg = get_config()
 
     if dry_run:
@@ -230,7 +242,6 @@ def execute_actions(
 
             results.append(result)
 
-    # Include skips in the log
     for action in skipped:
         results.append(ActionResult(action=action, outcome="SKIPPED"))
 
