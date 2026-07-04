@@ -107,7 +107,7 @@ def generate_report_node(state: AgentState) -> AgentState:
     report_dir.mkdir(parents=True, exist_ok=True)
     fname = f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
     report_path = report_dir / fname
-    report_path.write_text(html)
+    report_path.write_text(html, encoding="utf-8")
 
     logger.info(f"Report saved → {report_path}")
     logger.info(

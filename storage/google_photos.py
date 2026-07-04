@@ -1,9 +1,9 @@
 """
-Google Photos storage connector via REST API + OAuth 2.0.
+Google Photos storage connector via REST API + OAuth 2.0 (Picker API).
 
 One-time setup:
     1. console.cloud.google.com → create project
-    2. APIs & Services → Library → search "Photos Library API" → Enable
+    2. APIs & Services → Library → search "Photos Picker API" → Enable
     3. Credentials → + Create Credentials → OAuth 2.0 Client ID → Desktop App
     4. Download JSON → save as client_secret.json (or set GOOGLE_CREDENTIALS_PATH)
     5. First run opens a browser tab for Google sign-in. Token is cached afterward.
@@ -23,14 +23,15 @@ from storage.base import StorageScanner
 from utils.hasher import get_phash_from_bytes
 from utils.models import PhotoRecord
 
-SCOPES = ["https://www.googleapis.com/auth/photoslibrary.readonly"]
+# Using the new Picker API scope required as of March 2025
+SCOPES = ["https://www.googleapis.com/auth/photospicker.mediaitems.readonly"]
 THUMBNAIL_SUFFIX = "=w400-h400"   # enough resolution for accurate pHash, avoids large downloads
 PAGE_SIZE = 100
 RATE_LIMIT_DELAY = 0.1             # seconds between API page calls
 
 
 class GooglePhotosScanner(StorageScanner):
-    """Lists all photos in Google Photos and computes pHash from thumbnails."""
+    """Lists photos selected by the user via the Google Photos Picker API and computes pHash."""
 
     def __init__(self):
         self.cfg = get_config()
@@ -69,13 +70,60 @@ class GooglePhotosScanner(StorageScanner):
 
         return creds
 
-    # ── API calls ──────────────────────────────────────────────
+    # ── Picker API calls ───────────────────────────────────────
+    
+    def _create_picker_session(self, creds: Credentials) -> str:
+        url = "https://photospicker.googleapis.com/v1/sessions"
+        headers = {"Authorization": f"Bearer {creds.token}", "Content-Type": "application/json"}
+        
+        # We don't need to refresh manually inside here for the single POST unless it fails 401
+        response = requests.post(url, headers=headers, json={})
+        if response.status_code == 401:
+            creds.refresh(Request())
+            headers["Authorization"] = f"Bearer {creds.token}"
+            response = requests.post(url, headers=headers, json={})
+            
+        if response.status_code == 403:
+            logger.error("403 Forbidden. Ensure the 'Google Photos Picker API' is enabled in your Google Cloud Project.")
+            
+        response.raise_for_status()
+        data = response.json()
+        
+        session_id = data.get("id")
+        picker_uri = data.get("pickerUri")
+        
+        logger.info(f"\n"
+                    f"===============================================================\n"
+                    f" ACTION REQUIRED: Select photos to scan\n"
+                    f"===============================================================\n"
+                    f" Google no longer allows silent background scanning.\n"
+                    f" Please open this URL in your browser:\n\n"
+                    f" {picker_uri}\n\n"
+                    f" Select the photos you want to scan, click 'Done', then return here.\n"
+                    f"===============================================================\n")
+        
+        # Poll until the user completes the selection
+        poll_url = f"https://photospicker.googleapis.com/v1/sessions/{session_id}"
+        while True:
+            poll_resp = requests.get(poll_url, headers=headers)
+            poll_resp.raise_for_status()
+            poll_data = poll_resp.json()
+            
+            # The exact response field indicating completion might vary (e.g. mediaItemsSet). 
+            # We check if mediaItemsSet is true.
+            if poll_data.get("mediaItemsSet"):
+                logger.info("Selection complete detected!")
+                break
+                
+            time.sleep(3)
+            
+        return session_id
 
-    def _list_media_items(self, creds: Credentials) -> list[dict]:
-        """Page through /v1/mediaItems and return all raw API objects."""
+    def _list_media_items(self, creds: Credentials, session_id: str) -> list[dict]:
+        """Page through /v1/mediaItems?sessionId=... and return all raw API objects."""
         items: list[dict] = []
-        url = "https://photoslibrary.googleapis.com/v1/mediaItems"
-        params: dict = {"pageSize": PAGE_SIZE}
+        url = "https://photospicker.googleapis.com/v1/mediaItems"
+        params: dict = {"sessionId": session_id, "pageSize": PAGE_SIZE}
         retries = 0
 
         while True:
@@ -101,6 +149,7 @@ class GooglePhotosScanner(StorageScanner):
             time.sleep(RATE_LIMIT_DELAY)
 
         return items
+
 
     def _download_thumbnail_hash(self, base_url: str, creds: Credentials) -> Optional[str]:
         """Download a small thumbnail and compute its pHash."""
@@ -130,17 +179,32 @@ class GooglePhotosScanner(StorageScanner):
         logger.info("Authenticating with Google Photos...")
         creds = self._authenticate()
 
-        logger.info("Fetching Google Photos media items...")
-        raw_items = self._list_media_items(creds)
+        logger.info("Creating a Picker session...")
+        session_id = self._create_picker_session(creds)
+
+        logger.info("Fetching selected Google Photos media items...")
+        raw_items = self._list_media_items(creds, session_id)
+        
+        if not raw_items:
+            logger.info("No items were selected in the Picker UI.")
+            return []
+            
         logger.info(f"Found {len(raw_items)} items — computing hashes (this may take a while)...")
 
         records: list[PhotoRecord] = []
         for i, item in enumerate(raw_items):
-            mime = item.get("mimeType", "")
+            # Picker API items might have a nested mediaFile structure depending on version,
+            # but usually it's just flattened or contains a mediaFile object.
+            # Let's try to extract standard fields.
+            
+            # Extract nested mediaFile if present, else use item itself
+            media_file = item.get("mediaFile", item)
+            
+            mime = media_file.get("mimeType", "")
             if not mime.startswith("image/"):
                 continue   # skip videos
 
-            meta = item.get("mediaMetadata", {})
+            meta = media_file.get("mediaMetadata", {})
 
             created_at = None
             if ct := meta.get("creationTime"):
@@ -149,12 +213,16 @@ class GooglePhotosScanner(StorageScanner):
                 except ValueError:
                     pass
 
-            phash_val = self._download_thumbnail_hash(item["baseUrl"], creds)
+            base_url = media_file.get("baseUrl")
+            if not base_url:
+                continue
+
+            phash_val = self._download_thumbnail_hash(base_url, creds)
 
             record = PhotoRecord(
                 source="google_photos",
-                path_or_url=item["baseUrl"],
-                filename=item.get("filename", f"photo_{i:06d}"),
+                path_or_url=base_url,
+                filename=media_file.get("filename", f"photo_{i:06d}"),
                 size_bytes=0,                      # API does not expose file size
                 width=int(meta.get("width", 0)),   # original resolution from API
                 height=int(meta.get("height", 0)),
@@ -168,3 +236,4 @@ class GooglePhotosScanner(StorageScanner):
 
         logger.info(f"[google_photos] {len(records)} images indexed")
         return records
+
